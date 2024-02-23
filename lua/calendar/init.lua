@@ -23,7 +23,7 @@ local M = {}
 ---@field source string?
 ---@field done boolean?
 
----@alias CalendarImport fun(data: table, success: fun())
+---@alias CalendarImport fun(data: table, success: fun(), fail: fun())
 
 ---@class (exact) CalendarImportOptions
 ---@field fn CalendarImport
@@ -40,10 +40,12 @@ local M = {}
 ---@field import? CalendarImportOptions[]
 ---@field dataLocation? string
 ---@field dateFormat? string
+---@field lockFile? string
 local opts = {
     import = {},
     dataLocation = vim.fn.stdpath("data") .. "/calendar.json",
     dateFormat = "%Y-%m-%d %H:%M:%S",
+    lockFile = vim.fn.stdpath("data") .. "/calendar.lock"
 }
 function M.basicRawData()
     return {
@@ -52,6 +54,13 @@ function M.basicRawData()
         jobs = {}
     }
 end
+
+local isPrimary = false
+local lockIndex = 0
+
+---@type string[]
+--The jobs that are currently being ran by this instance
+local ownedJobs = {}
 
 local utils = require('calendar.utils')
 
@@ -80,6 +89,122 @@ function M.setup(o)
     M.readData()
     M.syncJobsTracked()
     M.saveData(rawData)
+    vim.api.nvim_create_autocmd({ "QuitPre" }, {
+        callback = function()
+            for _, job in ipairs(ownedJobs) do
+                for i, trackedJob in ipairs(rawData.jobs) do
+                    if trackedJob.id == job then
+                        rawData.jobs[i].running = false
+                        rawData.jobs[i].nextRun = 0
+                        rawData.jobs[i].lastRun = os.time()
+                        break
+                    end
+                end
+            end
+            M.saveData(rawData)
+            --- Remove the index from the lock file
+            local lockFile = io.open(opts.lockFile, "r")
+            if lockFile == nil then
+                error("Could not open lock file for reading")
+            end
+            local lines = {}
+            for line in lockFile:lines() do
+                lines[#lines + 1] = line
+            end
+            lockFile:close()
+            for i = #lines, 1, -1 do
+                if tonumber(lines[i]) == lockIndex then
+                    table.remove(lines, i)
+                    break
+                end
+            end
+            for i, line in ipairs(lines) do
+                if tonumber(line) == lockIndex then
+                    table.remove(lines, i)
+                    break
+                end
+            end
+            lockFile = io.open(opts.lockFile, "w")
+            if lockFile == nil then
+                error("Could not open lock file for writing")
+            end
+            for _, line in ipairs(lines) do
+                lockFile:write(line .. "\n")
+            end
+            lockFile:close()
+        end
+    })
+
+    local lockFile = io.open(opts.lockFile, "r")
+    if lockFile == nil then
+        lockFile = io.open(opts.lockFile, "w")
+        if lockFile == nil then
+            error("Could not open lock file for reading or writing")
+        end
+        lockFile:write("1")
+        lockFile:close()
+        lockIndex = 1
+        isPrimary = true
+    else
+        --basically read the entire file (1 number per line) add 1 to the maximum number, and append that to the file
+        --then set isPrimary to false
+        local lines = {}
+        for line in lockFile:lines() do
+            lines[#lines + 1] = line
+        end
+        lockFile:close()
+        for _, line in ipairs(lines) do
+            local num = tonumber(line) or 0
+            if num > lockIndex then
+                lockIndex = num
+            end
+        end
+        lockIndex = lockIndex + 1
+        lockFile = io.open(opts.lockFile, "w")
+        if lockFile == nil then
+            error("Could not open lock file for writing")
+        end
+        lines[#lines + 1] = lockIndex
+        for _, line in ipairs(lines) do
+            lockFile:write(line .. "\n")
+        end
+        lockFile:close()
+    end
+end
+
+function M.isPrimary()
+    return isPrimary
+end
+
+function M.updatePrimary()
+    if isPrimary then
+        return
+    end
+    local lockFile = io.open(opts.lockFile, "r")
+    if lockFile == nil then
+        error("Could not open lock file for reading")
+    end
+    local lines = {}
+    for line in lockFile:lines() do
+        lines[#lines + 1] = line
+    end
+    lockFile:close()
+    for i = #lines, 1, -1 do
+        if tonumber(lines[i]) == nil then
+            table.remove(lines, i)
+        end
+    end
+    lockFile = io.open(opts.lockFile, "w")
+    if lockFile == nil then
+        error("Could not open lock file for writing")
+    end
+    for _, line in ipairs(lines) do
+        lockFile:write(line .. "\n")
+    end
+    lockFile:close()
+    if tonumber(lines[1]) == lockIndex then
+        isPrimary = true
+    end
 end
 
 function M.getOpts()
@@ -181,6 +306,50 @@ function M.addEvent(event)
     return M.saveData(rawData)
 end
 
+function M.inputEvent()
+    local title = vim.fn.input("Title: ")
+    local description = vim.fn.input("Description: ")
+    local location = vim.fn.input("Location: ")
+    local startTime = vim.fn.input("Start Time: ")
+    local endTime = vim.fn.input("End Time: ")
+    local warnTime = vim.fn.input("Warn Time: ")
+    local type = "event"
+    local done = false
+    local source = "manual"
+    local event = {
+        title = title,
+        description = description,
+        location = location,
+        startTime = startTime,
+        endTime = endTime,
+        warnTime = warnTime,
+        type = type,
+        done = done,
+        source = source
+    }
+    M.addEvent(event)
+end
+
+function M.inputAssignment()
+    local title = vim.fn.input("Title: ")
+    local description = vim.fn.input("Description: ")
+    local due = vim.fn.input("Due: ")
+    local warnTime = vim.fn.input("Warn Time: ")
+    local type = "assignment"
+    local done = false
+    local source = "manual"
+    local assignment = {
+        title = title,
+        description = description,
+        due = due,
+        warnTime = warnTime,
+        type = type,
+        done = done,
+        source = source
+    }
+    M.addAssignment(assignment)
+end
+
 function M.addAssignment(assignment)
     local validate = M.validateAssignment(assignment)
     if validate ~= '' then
@@ -198,7 +367,9 @@ end
 
 ---@return CalendarAssignment[]
 function M.getAssignmentsToWorryAbout()
-    -- M.readData()
+    M.updatePrimary()
+    M.readData()
+    M.clearPast()
     local now = os.time()
     local events = {}
     for _, assignment in ipairs(rawData.assignments) do
@@ -212,7 +383,9 @@ end
 
 ---@return CalendarEvent[]
 function M.getEventsToWorryAbout()
-    -- M.readData()
+    M.updatePrimary()
+    M.readData()
+    M.clearPast()
     local now = os.time()
     local events = {}
     for _, event in ipairs(rawData.events) do
@@ -226,6 +399,7 @@ end
 
 ---@return (CalendarEvent | CalendarAssignment)[]
 function M.getStuffToWorryAbout()
+    M.clearPast()
     -- M.readData()
     local now = os.time()
     local events = {}
@@ -284,19 +458,60 @@ function M.markDone(name)
     end
 end
 
-function M.runJob(id)
+function M.runJob(id, force)
+    if not isPrimary then
+        return
+    end
     for _, job in ipairs(opts.import) do
         if job.id == id then
-            job.fn({}, function()
+            for i, trackedJob in ipairs(rawData.jobs) do
+                if trackedJob.id == id then
+                    if trackedJob.running and not force then
+                        return
+                    end
+                    rawData.jobs[i].running = true
+                    M.saveData(rawData)
+                    break
+                end
+            end
+            ownedJobs[#ownedJobs + 1] = id
+            local fail = function()
                 for i, trackedJob in ipairs(rawData.jobs) do
                     if trackedJob.id == id then
+                        rawData.jobs[i].running = false
+                        rawData.jobs[i].nextRun = 0
                         rawData.jobs[i].lastRun = os.time()
-                        rawData.jobs[i].nextRun = os.time() + utils.relativeTimeToSeconds(job.runFrequency)
+                        for j, ownedJob in ipairs(ownedJobs) do
+                            if ownedJob == id then
+                                table.remove(ownedJobs, j)
+                                break
+                            end
+                        end
                         M.saveData(rawData)
                         break
                     end
                 end
-            end)
+            end
+            local ok, _ = pcall(job.fn, {}, function()
+                for i, trackedJob in ipairs(rawData.jobs) do
+                    if trackedJob.id == id then
+                        rawData.jobs[i].running = false
+                        rawData.jobs[i].lastRun = os.time()
+                        rawData.jobs[i].nextRun = os.time() + utils.relativeTimeToSeconds(job.runFrequency)
+                        for j, ownedJob in ipairs(ownedJobs) do
+                            if ownedJob == id then
+                                table.remove(ownedJobs, j)
+                                break
+                            end
+                        end
+                        M.saveData(rawData)
+                        break
+                    end
+                end
+            end, fail)
+            if not ok then
+                fail()
+            end
             return
         end
     end
@@ -348,22 +563,9 @@ function M.syncJobsTracked()
 end
 
 function M.checkJobsTracked()
-    for i, job in ipairs(rawData.jobs) do
+    for _, job in ipairs(rawData.jobs) do
         if job.nextRun <= os.time() then
-            for _, import in ipairs(opts.import) do
-                if import.id == job.id then
-                    import.fn({}, function()
-                        rawData.jobs[i].lastRun = os.time()
-                        rawData.jobs[i].nextRun = os.time() + utils.relativeTimeToSeconds(import.runFrequency)
-                        rawData.jobs[i].running = false
-                        M.saveData(rawData)
-                    end)
-                    job.nextRun = os.time() + 1000000000000
-                    job.running = true
-                    M.saveData(rawData)
-                    break
-                end
-            end
+            M.runJob(job.id)
         end
     end
 end
@@ -373,6 +575,9 @@ function M.getRawData()
 end
 
 function M.readData()
+    if isPrimary then
+        return rawData
+    end
     local file = io.open(opts.dataLocation, "r")
     if file == nil then
         file = io.open(opts.dataLocation, "w")
@@ -407,12 +612,12 @@ function M.readData()
 end
 
 function M.saveData(data)
+    if not isPrimary then
+        return
+    end
     local file = io.open(opts.dataLocation, "w")
     if file == nil then
-        print("sdfsdf")
-        error('sadf')
         return "Could not open file for writing"
-        -- error("Could not open file for writing")
     end
 
     file:write(vim.json.encode(data))
