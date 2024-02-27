@@ -73,8 +73,15 @@ function M.absoluteTimeToSeconds(str)
 end
 
 function M.absoluteTimeToPretty(str)
-    if type(str) == "string" then
-        return str
+    str = M.absoluteTimeToSeconds(str)
+    -- check if they are on the same day
+    -- if they are, only show the time
+    if os.date("%Y-%m-%d", str) == os.date("%Y-%m-%d", M.getSeconds()) then
+        return "Today " .. os.date("%I:%M %p", str)
+    end
+    -- If they are before 1 week from now, show the day of the week
+    if str < M.getSeconds() + 604800 then
+        return os.date("%A, %I:%M %p", str)
     end
     return vim.fn.strftime(require('calendar').getOpts().dateFormat, str)
 end

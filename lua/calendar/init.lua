@@ -40,13 +40,23 @@ local M = {}
 ---@field import? CalendarImportOptions[]
 ---@field dataLocation? string
 ---@field dateFormat? string
----@field lockFile? string
+---@field lockDir? string
+---@field requestFile? string
 local opts = {
     import = {},
     dataLocation = vim.fn.stdpath("data") .. "/calendar.json",
     dateFormat = "%Y-%m-%d %H:%M:%S",
-    lockFile = vim.fn.stdpath("data") .. "/calendar.lock"
+    lockDir = vim.fn.stdpath("data"),
+    requestFile = vim.fn.stdpath("data") .. "/calendar_requests.json"
 }
+
+---@class (exact) CalendarRequest
+---@field type "runJob"|"markDone"|"addEvent"|"addAssignment"
+---@field name string?
+---@field data table?
+
+
+
 function M.basicRawData()
     return {
         events = {},
@@ -57,6 +67,7 @@ end
 
 local isPrimary = false
 local lockIndex = 0
+
 
 ---@type string[]
 --The jobs that are currently being ran by this instance
@@ -72,24 +83,372 @@ local utils = require('calendar.utils')
 ---@type CalendarRawData
 local rawData = M.basicRawData()
 
+function M.getLockFileName(index)
+    return opts.lockDir .. "/calendar_" .. index .. ".lock"
+end
+
+function M.checkPrimaryLockExists()
+    local file = io.open(M.getLockFileName(1), "r")
+    if file == nil then
+        return false
+    end
+    file:close()
+    return true
+end
+
+function M.removeCurrentLock()
+    local fileName = M.getLockFileName(lockIndex)
+    os.remove(fileName)
+end
+
+function M.createLock()
+    local index = 1
+    while M.lockFileExists(index) do
+        index = index + 1
+    end
+    local file = io.open(M.getLockFileName(index), "w")
+    if file == nil then
+        error("Could not open lock file for writing")
+    end
+    file:write(tostring(index))
+    file:close()
+    lockIndex = index
+    isPrimary = index == 1
+end
+
+function M.lockFileExists(index)
+    local file = io.open(M.getLockFileName(index), "r")
+    if file == nil then
+        return false
+    end
+    file:close()
+    return true
+end
+
+function M.isLowestLock()
+    for i = 1, lockIndex - 1 do
+        if M.lockFileExists(i) then
+            return false
+        end
+    end
+    return true
+end
+
+function M.forceClearLocks()
+    for i = 1, lockIndex do
+        if M.lockFileExists(i) then
+            os.remove(M.getLockFileName(i))
+        end
+    end
+end
+
+---@param r CalendarRequest
+function M.handleRequest(r)
+    if not isPrimary then
+        return
+    end
+    print("Handling request for " .. r.type)
+    if r.type == "runJob" then
+        M.runJob(r.name, true)
+    elseif r.type == "markDone" then
+        M.markDone(r.name)
+    elseif r.type == "addEvent" then
+        M.addEvent(r.data)
+    elseif r.type == "addAssignment" then
+        M.addAssignment(r.data)
+    else
+        print("Invalid request type " .. r.type)
+    end
+end
+
+function M.checkRequestFile()
+    if not isPrimary then
+        return false
+    end
+    local file = io.open(opts.requestFile, "r")
+    if file == nil then
+        return false
+    end
+    local contents = file:read("*all")
+    file:close()
+    if contents == "" then
+        return false
+    end
+    local ok, data = pcall(vim.json.decode, contents)
+    if not ok then
+        return false
+    end
+    data = data or {}
+    os.remove(opts.requestFile)
+    for _, r in ipairs(data) do
+        M.handleRequest(r)
+    end
+    return true
+end
+
+---@param r CalendarRequest
+function M.addRequest(r)
+    if isPrimary then
+        return
+    end
+    print("Adding request for " .. r.type)
+    local file = io.open(opts.requestFile, "r")
+    if file == nil then
+        file = io.open(opts.requestFile, "w")
+        if file == nil then
+            error("Could not open file for reading or writing")
+        end
+        file:write(vim.json.encode({ r }))
+        file:close()
+        return
+    end
+    local contents = file:read("*all")
+    file:close()
+    local ok, data = pcall(vim.json.decode, contents)
+    if not ok then
+        data = {}
+    end
+    data = data or {}
+    data[#data + 1] = r
+    file = io.open(opts.requestFile, "w")
+    if file == nil then
+        error("Could not open file for writing")
+    end
+    file:write(vim.json.encode(data))
+    file:close()
+end
+
+---@return string
+---Turns an event name into a command name by replacing ' ' with '-'
+---@param name string
+function M.getCommandName(name)
+    local str, _ = string.gsub(name, " ", "-")
+    return str
+end
+
+function M.getEventOrAssignmentFromCommandName(name)
+    for _, event in ipairs(rawData.events) do
+        if M.getCommandName(event.title) == name then
+            return event
+        end
+    end
+    for _, assignment in ipairs(rawData.assignments) do
+        if M.getCommandName(assignment.title) == name then
+            return assignment
+        end
+    end
+    return nil
+end
+
+local commandTree = {
+    Calendar = {
+        runJob = {
+            extra = function()
+                local ret = {}
+                for _, job in ipairs(rawData.jobs) do
+                    ret[#ret + 1] = job.id
+                end
+                return ret
+            end,
+            callback = function(args)
+                M.runJob(args[1])
+            end
+        },
+        forceClearLocks = {
+            callback = function()
+                M.forceClearLocks()
+            end
+        },
+        assigment = {
+            input = {
+                callback = function() M.inputAssignment() end
+            },
+            modify = {
+                extra = function()
+                    local ret = {}
+                    for _, assignment in ipairs(rawData.assignments) do
+                        if not assignment.done then
+                            ret[#ret + 1] = M.getCommandName(assignment.title)
+                        end
+                    end
+                    return ret
+                end,
+                callback = function(args)
+                    local name = args[1]
+                    M.modifyAssignment(M.getEventOrAssignmentFromCommandName(name))
+                end
+            }
+        },
+        event = {
+            input = {
+                callback = function() M.inputEvent() end
+            },
+            modify = {
+                extra = function()
+                    local ret = {}
+                    for _, event in ipairs(rawData.events) do
+                        if not event.done then
+                            ret[#ret + 1] = M.getCommandName(event.title)
+                        end
+                    end
+                    return ret
+                end,
+                callback = function(args)
+                    local name = args[1]
+                    M.modifyEvent(M.getEventOrAssignmentFromCommandName(name))
+                end
+            }
+        },
+        remove = {
+            extra = function()
+                local ret = {}
+                for _, event in ipairs(rawData.events) do
+                    if not event.done then
+                        ret[#ret + 1] = M.getCommandName(event.title)
+                    end
+                end
+                for _, assignment in ipairs(rawData.assignments) do
+                    if not assignment.done then
+                        ret[#ret + 1] = M.getCommandName(assignment.title)
+                    end
+                end
+                return ret
+            end,
+            callback = function(args)
+                local name = args[1]
+                M.markDone(M.getEventOrAssignmentFromCommandName(name).title)
+            end
+        },
+    }
+}
+
+function M.isUsableCommandTree(v)
+    if v.callback ~= nil then
+        return true
+    end
+    if v.extra ~= nil then
+        return true
+    end
+    return false
+end
+
+local function filterCompletion(working, items)
+    local newItems = {}
+    for _, item in ipairs(items) do
+        if item:sub(1, #working) == working then
+            table.insert(newItems, item)
+        end
+    end
+    return newItems
+end
+function M.createCalendarCommand()
+    vim.api.nvim_create_user_command("Calendar", function(cmdOpts)
+        -- print(vim.inspect(cmdOpts.fargs))
+        if cmdOpts.fargs == nil or #cmdOpts.fargs == 0 then
+            require('calendar.ui').render()
+            return
+        end
+        local currentCommand = commandTree.Calendar[cmdOpts.fargs[1]]
+        if currentCommand == nil then
+            print("Invalid command " .. cmdOpts.fargs[1])
+            -- require('calendar.ui').render()
+            return
+        end
+        local i = 2
+        while not M.isUsableCommandTree(currentCommand) do
+            if cmdOpts.fargs[i] == nil then
+                print("Invalid command " .. cmdOpts.fargs[i - 1])
+                print(vim.inspect(currentCommand))
+                return
+            end
+            currentCommand = currentCommand[cmdOpts.fargs[i]]
+            if currentCommand == nil then
+                print("Invalid command " .. cmdOpts.fargs[i])
+                return
+            end
+            i = i + 1
+        end
+        if currentCommand.extra ~= nil then
+            local extra = currentCommand.extra()
+            local extraArg = cmdOpts.fargs[i]
+            if extraArg == nil then
+                print("Expected an extra argument after " .. cmdOpts.fargs[i - 1])
+                return
+            end
+            local found = false
+            for _, v in ipairs(extra) do
+                if v == extraArg then
+                    found = true
+                    break
+                end
+            end
+            if not found then
+                print("Invalid extra argument " .. extraArg)
+                return
+            end
+            local args = { extraArg }
+            i = i + 1
+            while i <= #cmdOpts.fargs do
+                args[#args + 1] = cmdOpts.fargs[i]
+                i = i + 1
+            end
+            currentCommand.callback(args)
+        else
+            local args = {}
+            for j = i, #cmdOpts.fargs do
+                args[#args + 1] = cmdOpts.fargs[j]
+            end
+
+            currentCommand.callback(args)
+        end
+    end, {
+        nargs = "*",
+        complete = function(working, current)
+            local currentCommand = commandTree
+            local i = 1
+            local cmdString = ""
+            while i <= #current do
+                local c = current:sub(i, i)
+                if c == " " then
+                    if currentCommand[cmdString] == nil then
+                        return {}
+                    end
+                    currentCommand = currentCommand[cmdString]
+                    if currentCommand.extra ~= nil then
+                        local extra = currentCommand.extra()
+                        for _, v in ipairs(extra) do
+                            currentCommand[v] = {}
+                        end
+                    end
+                    cmdString = ""
+                else
+                    cmdString = cmdString .. c
+                end
+                i = i + 1
+            end
+            if currentCommand == nil then
+                return {}
+            end
+            local cmds = {}
+            for k, _ in pairs(currentCommand) do
+                if k == "extra" or k == "callback" then
+                    goto continue
+                end
+                cmds[#cmds + 1] = k
+                ::continue::
+            end
+            return filterCompletion(working, cmds)
+        end
+
+    })
+end
+
 ---@param o CalendarOptions
 function M.setup(o)
     opts = vim.tbl_extend("force", opts, o)
-    vim.api.nvim_create_user_command("Calendar", function(cmdOpts)
-        if cmdOpts.fargs == nil or #cmdOpts.fargs then
-            require('calendar.ui').render()
-        end
-        if cmdOpts.fargs[1] == "remove" then
-            require('calendar').markDone(cmdOpts.fargs[2])
-        end
-    end, {
-        nargs = "*"
-
-    })
-    M.readData()
-    M.syncJobsTracked()
-    M.saveData(rawData)
-    vim.api.nvim_create_autocmd({ "QuitPre" }, {
+    M.readData(true)
+    M.createCalendarCommand()
+    vim.api.nvim_create_autocmd({ "VimLeave" }, {
         callback = function()
             for _, job in ipairs(ownedJobs) do
                 for i, trackedJob in ipairs(rawData.jobs) do
@@ -102,74 +461,12 @@ function M.setup(o)
                 end
             end
             M.saveData(rawData)
-            --- Remove the index from the lock file
-            local lockFile = io.open(opts.lockFile, "r")
-            if lockFile == nil then
-                error("Could not open lock file for reading")
-            end
-            local lines = {}
-            for line in lockFile:lines() do
-                lines[#lines + 1] = line
-            end
-            lockFile:close()
-            for i = #lines, 1, -1 do
-                if tonumber(lines[i]) == lockIndex then
-                    table.remove(lines, i)
-                    break
-                end
-            end
-            for i, line in ipairs(lines) do
-                if tonumber(line) == lockIndex then
-                    table.remove(lines, i)
-                    break
-                end
-            end
-            lockFile = io.open(opts.lockFile, "w")
-            if lockFile == nil then
-                error("Could not open lock file for writing")
-            end
-            for _, line in ipairs(lines) do
-                lockFile:write(line .. "\n")
-            end
-            lockFile:close()
+            M.removeCurrentLock()
         end
     })
 
-    local lockFile = io.open(opts.lockFile, "r")
-    if lockFile == nil then
-        lockFile = io.open(opts.lockFile, "w")
-        if lockFile == nil then
-            error("Could not open lock file for reading or writing")
-        end
-        lockFile:write("1")
-        lockFile:close()
-        lockIndex = 1
-        isPrimary = true
-    else
-        --basically read the entire file (1 number per line) add 1 to the maximum number, and append that to the file
-        --then set isPrimary to false
-        local lines = {}
-        for line in lockFile:lines() do
-            lines[#lines + 1] = line
-        end
-        lockFile:close()
-        for _, line in ipairs(lines) do
-            local num = tonumber(line) or 0
-            if num > lockIndex then
-                lockIndex = num
-            end
-        end
-        lockIndex = lockIndex + 1
-        lockFile = io.open(opts.lockFile, "w")
-        if lockFile == nil then
-            error("Could not open lock file for writing")
-        end
-        lines[#lines + 1] = lockIndex
-        for _, line in ipairs(lines) do
-            lockFile:write(line .. "\n")
-        end
-        lockFile:close()
-    end
+    M.createLock()
+    M.syncJobsTracked()
 end
 
 function M.isPrimary()
@@ -180,30 +477,12 @@ function M.updatePrimary()
     if isPrimary then
         return
     end
-    local lockFile = io.open(opts.lockFile, "r")
-    if lockFile == nil then
-        error("Could not open lock file for reading")
+    if M.checkPrimaryLockExists() then
+        return
     end
-    local lines = {}
-    for line in lockFile:lines() do
-        lines[#lines + 1] = line
-    end
-    lockFile:close()
-    for i = #lines, 1, -1 do
-        if tonumber(lines[i]) == nil then
-            table.remove(lines, i)
-        end
-    end
-    lockFile = io.open(opts.lockFile, "w")
-    if lockFile == nil then
-        error("Could not open lock file for writing")
-    end
-    for _, line in ipairs(lines) do
-        lockFile:write(line .. "\n")
-    end
-    lockFile:close()
-    if tonumber(lines[1]) == lockIndex then
-        isPrimary = true
+    if M.isLowestLock() then
+        M.removeCurrentLock()
+        M.createLock()
     end
 end
 
@@ -291,10 +570,70 @@ function M.validateAssignment(a)
     return ''
 end
 
+local function getInputDefault(prompt, default)
+    local input = vim.fn.input(prompt .. " (" .. default .. "): ")
+    if input == '' then
+        return default .. ""
+    end
+    return input .. ""
+end
+
+function M.modifyEvent(e)
+    if e == nil then
+        return
+    end
+    local event = nil
+    for _, ev in ipairs(rawData.events) do
+        if ev.title == e.title then
+            event = ev
+            break
+        end
+    end
+    if event == nil then
+        return
+    end
+    local description = getInputDefault("Description", event.description)
+    local location = getInputDefault("Location", event.location)
+    ---@type string|integer
+    local startTime = getInputDefault("Start Time", event.startTime)
+    if startTime:sub(1, 1) == '+' then
+        startTime = os.time() + utils.relativeTimeToSeconds(startTime:sub(2))
+    end
+    ---@type string|integer
+    local endTime = getInputDefault("End Time", event.endTime)
+    if endTime:sub(1, 1) == '+' then
+        endTime = os.time() + utils.relativeTimeToSeconds(endTime:sub(2))
+    end
+    local warnTime = getInputDefault("Warn Time", event.warnTime)
+    local type = "event"
+    local done = false
+    local source = event.source
+    local newEvent = {
+        title = event.title,
+        description = description,
+        location = location,
+        startTime = startTime,
+        endTime = endTime,
+        warnTime = warnTime,
+        type = type,
+        done = done,
+        source = source
+    }
+    M.addEvent(newEvent)
+end
+
 function M.addEvent(event)
+    event.type = "event"
     local validate = M.validateEvent(event)
     if validate ~= '' then
         return validate
+    end
+    if not isPrimary then
+        M.addRequest({
+            type = "addEvent",
+            data = event
+        })
+        return
     end
     for i, e in ipairs(rawData.events) do
         if e.title == event.title then
@@ -310,8 +649,16 @@ function M.inputEvent()
     local title = vim.fn.input("Title: ")
     local description = vim.fn.input("Description: ")
     local location = vim.fn.input("Location: ")
+    ---@type string|integer
     local startTime = vim.fn.input("Start Time: ")
+    if startTime:sub(1, 1) == '+' then
+        startTime = (os.time() + utils.relativeTimeToSeconds(startTime:sub(2)))
+    end
+    ---@type string|integer
     local endTime = vim.fn.input("End Time: ")
+    if endTime:sub(1, 1) == '+' then
+        endTime = os.time() + utils.relativeTimeToSeconds(endTime:sub(2))
+    end
     local warnTime = vim.fn.input("Warn Time: ")
     local type = "event"
     local done = false
@@ -333,11 +680,17 @@ end
 function M.inputAssignment()
     local title = vim.fn.input("Title: ")
     local description = vim.fn.input("Description: ")
+    ---@type string|integer
     local due = vim.fn.input("Due: ")
+    if due:sub(1, 1) == '+' then
+        print(due:sub(2))
+        due = os.time() + utils.relativeTimeToSeconds(due:sub(2))
+    end
     local warnTime = vim.fn.input("Warn Time: ")
     local type = "assignment"
     local done = false
     local source = "manual"
+    ---@type CalendarAssignment
     local assignment = {
         title = title,
         description = description,
@@ -350,14 +703,58 @@ function M.inputAssignment()
     M.addAssignment(assignment)
 end
 
+function M.modifyAssignment(a)
+    if a == nil then
+        return
+    end
+    local assignment = nil
+    for _, as in ipairs(rawData.assignments) do
+        if as.title == a.title then
+            assignment = as
+            break
+        end
+    end
+    if assignment == nil then
+        return
+    end
+    local description = getInputDefault("Description", assignment.description)
+    ---@type string|integer
+    local due = getInputDefault("Due", assignment.due)
+    if due:sub(1, 1) == '+' then
+        due = os.time() + utils.relativeTimeToSeconds(due:sub(2))
+    end
+    local warnTime = getInputDefault("Warn Time", assignment.warnTime)
+    local type = "assignment"
+    local done = false
+    local source = assignment.source
+    local newAssignment = {
+        title = assignment.title,
+        description = description,
+        due = due,
+        warnTime = warnTime,
+        type = type,
+        done = done,
+        source = source
+    }
+    M.addAssignment(newAssignment)
+end
+
 function M.addAssignment(assignment)
+    assignment.type = "assignment"
     local validate = M.validateAssignment(assignment)
     if validate ~= '' then
         error(validate)
     end
+    if not isPrimary then
+        M.addRequest({
+            type = "addAssignment",
+            data = assignment
+        })
+        return
+    end
     for i, a in ipairs(rawData.assignments) do
         if a.title == assignment.title then
-            rawData.assignments[i] = assignment
+            rawData.assignments[i] = vim.tbl_extend("force", rawData.assignments[i], assignment)
             return M.saveData(rawData)
         end
     end
@@ -383,9 +780,8 @@ end
 
 ---@return CalendarEvent[]
 function M.getEventsToWorryAbout()
-    M.updatePrimary()
     M.readData()
-    M.clearPast()
+    M.updateForPrimary()
     local now = os.time()
     local events = {}
     for _, event in ipairs(rawData.events) do
@@ -399,7 +795,8 @@ end
 
 ---@return (CalendarEvent | CalendarAssignment)[]
 function M.getStuffToWorryAbout()
-    M.clearPast()
+    M.readData()
+    M.updateForPrimary()
     -- M.readData()
     local now = os.time()
     local events = {}
@@ -419,6 +816,9 @@ function M.getStuffToWorryAbout()
 end
 
 function M.clearPast()
+    if not isPrimary then
+        return
+    end
     -- M.readData()
     local now = os.time()
     local newEvents = {}
@@ -439,7 +839,24 @@ function M.clearPast()
     return rawData
 end
 
+function M.updateForPrimary()
+    if not isPrimary then
+        return
+    end
+    M.checkRequestFile()
+    M.checkJobsTracked()
+    M.clearPast()
+end
+
 function M.markDone(name)
+    if not isPrimary then
+        print("Not primary")
+        M.addRequest({
+            type = "markDone",
+            name = name
+        })
+        return
+    end
     for i, event in ipairs(rawData.events) do
         if event.title == name then
             rawData.events[i].done = true
@@ -460,6 +877,11 @@ end
 
 function M.runJob(id, force)
     if not isPrimary then
+        print("Not primary")
+        M.addRequest({
+            type = "runJob",
+            name = id
+        })
         return
     end
     for _, job in ipairs(opts.import) do
@@ -467,9 +889,13 @@ function M.runJob(id, force)
             for i, trackedJob in ipairs(rawData.jobs) do
                 if trackedJob.id == id then
                     if trackedJob.running and not force then
+                        print("Job " .. id .. " already running")
                         return
                     end
+                    print("Running job " .. id)
                     rawData.jobs[i].running = true
+                    rawData.jobs[i].lastRun = os.time()
+                    rawData.jobs[i].nextRun = os.time() + utils.relativeTimeToSeconds(job.runFrequency)
                     M.saveData(rawData)
                     break
                 end
@@ -478,8 +904,9 @@ function M.runJob(id, force)
             local fail = function()
                 for i, trackedJob in ipairs(rawData.jobs) do
                     if trackedJob.id == id then
+                        print("Job " .. id .. " failed")
                         rawData.jobs[i].running = false
-                        rawData.jobs[i].nextRun = 0
+                        rawData.jobs[i].nextRun = os.time() + 60
                         rawData.jobs[i].lastRun = os.time()
                         for j, ownedJob in ipairs(ownedJobs) do
                             if ownedJob == id then
@@ -495,6 +922,7 @@ function M.runJob(id, force)
             local ok, _ = pcall(job.fn, {}, function()
                 for i, trackedJob in ipairs(rawData.jobs) do
                     if trackedJob.id == id then
+                        print("Job " .. id .. " succeeded")
                         rawData.jobs[i].running = false
                         rawData.jobs[i].lastRun = os.time()
                         rawData.jobs[i].nextRun = os.time() + utils.relativeTimeToSeconds(job.runFrequency)
@@ -559,7 +987,7 @@ function M.syncJobsTracked()
     end
     -- print(vim.inspect(rawData))
     M.saveData(rawData)
-    M.readData()
+    -- M.readData()
 end
 
 function M.checkJobsTracked()
@@ -574,8 +1002,8 @@ function M.getRawData()
     return rawData
 end
 
-function M.readData()
-    if isPrimary then
+function M.readData(force)
+    if isPrimary and not force then
         return rawData
     end
     local file = io.open(opts.dataLocation, "r")
@@ -604,9 +1032,6 @@ function M.readData()
     file:close()
     rawData = vim.tbl_extend("force", M.basicRawData(), data)
 
-    vim.schedule(function()
-        M.checkJobsTracked()
-    end)
 
     return rawData
 end
