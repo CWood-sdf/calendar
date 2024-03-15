@@ -51,7 +51,7 @@ local opts = {
 }
 
 ---@class (exact) CalendarRequest
----@field type "runJob"|"markDone"|"addEvent"|"addAssignment"
+---@field type "runJob"|"markDone"|"addEvent"|"addAssignment"|"timezoneShift"|"delete"
 ---@field name string?
 ---@field data table?
 
@@ -82,6 +82,7 @@ local utils = require('calendar.utils')
 
 ---@type CalendarRawData
 local rawData = M.basicRawData()
+local lastRawData = M.basicRawData()
 
 function M.getLockFileName(index)
     return opts.lockDir .. "/calendar_" .. index .. ".lock"
@@ -94,6 +95,19 @@ function M.checkPrimaryLockExists()
     end
     file:close()
     return true
+end
+
+function M.lockCountBelow()
+    local count = 0
+    for i = 1, lockIndex do
+        if i == lockIndex then
+            break
+        end
+        if M.lockFileExists(i) then
+            count = count + 1
+        end
+    end
+    return count
 end
 
 function M.removeCurrentLock()
@@ -147,7 +161,7 @@ function M.handleRequest(r)
     if not isPrimary then
         return
     end
-    print("Handling request for " .. r.type)
+    -- print("Handling request for " .. r.type)
     if r.type == "runJob" then
         M.runJob(r.name, true)
     elseif r.type == "markDone" then
@@ -156,6 +170,10 @@ function M.handleRequest(r)
         M.addEvent(r.data)
     elseif r.type == "addAssignment" then
         M.addAssignment(r.data)
+    elseif r.type == "delete" then
+        M.delete(r.name)
+    elseif r.type == "timezoneShift" then
+        M.timezoneShift(r.data[1])
     else
         print("Invalid request type " .. r.type)
     end
@@ -240,31 +258,62 @@ function M.getEventOrAssignmentFromCommandName(name)
     return nil
 end
 
+local ct = require('cmdTree')
+local getEventsOrAssignments = ct.requiredParams(function()
+    local ret = {}
+    for _, event in ipairs(rawData.events) do
+        if not event.done then
+            ret[#ret + 1] = M.getCommandName(event.title)
+        end
+    end
+    for _, assignment in ipairs(rawData.assignments) do
+        if not assignment.done then
+            ret[#ret + 1] = M.getCommandName(assignment.title)
+        end
+    end
+    return ret
+end)
+
 local commandTree = {
     Calendar = {
+        _callback = function()
+            require('calendar.ui').render()
+        end,
         runJob = {
-            extra = function()
+
+            ct.requiredParams(function()
                 local ret = {}
                 for _, job in ipairs(rawData.jobs) do
                     ret[#ret + 1] = job.id
                 end
                 return ret
-            end,
-            callback = function(args)
-                M.runJob(args[1])
+            end),
+            _callback = function(args)
+                M.runJob(args[1], args[2] == "true" or args[2] == "1" or args[2] == "force")
+            end
+        },
+        shiftTimezone = {
+            _callback = function(args)
+                local delta = ""
+                if args.params[1] == nil or args.params[1][1] == nil then
+                    delta = vim.fn.input("Delta: ")
+                else
+                    delta = args.params[1][1]
+                end
+                M.timezoneShift(delta)
             end
         },
         forceClearLocks = {
-            callback = function()
+            _callback = function()
                 M.forceClearLocks()
             end
         },
         assigment = {
             input = {
-                callback = function() M.inputAssignment() end
+                _callback = function() M.inputAssignment() end
             },
             modify = {
-                extra = function()
+                ct.requiredParams(function()
                     local ret = {}
                     for _, assignment in ipairs(rawData.assignments) do
                         if not assignment.done then
@@ -272,8 +321,8 @@ local commandTree = {
                         end
                     end
                     return ret
-                end,
-                callback = function(args)
+                end),
+                _callback = function(args)
                     local name = args[1]
                     M.modifyAssignment(M.getEventOrAssignmentFromCommandName(name))
                 end
@@ -281,10 +330,10 @@ local commandTree = {
         },
         event = {
             input = {
-                callback = function() M.inputEvent() end
+                _callback = function() M.inputEvent() end
             },
             modify = {
-                extra = function()
+                ct.requiredParams(function()
                     local ret = {}
                     for _, event in ipairs(rawData.events) do
                         if not event.done then
@@ -292,31 +341,34 @@ local commandTree = {
                         end
                     end
                     return ret
-                end,
-                callback = function(args)
-                    local name = args[1]
+                end),
+                _callback = function(args)
+                    local name = args.params[1][1]
                     M.modifyEvent(M.getEventOrAssignmentFromCommandName(name))
                 end
             }
         },
         remove = {
-            extra = function()
+            getEventsOrAssignments,
+            _callback = function(args)
+                local name = args.params[1][1]
+                M.markDone(M.getEventOrAssignmentFromCommandName(name).title)
+            end
+        },
+        delete = {
+            ct.requiredParams(function()
                 local ret = {}
                 for _, event in ipairs(rawData.events) do
-                    if not event.done then
-                        ret[#ret + 1] = M.getCommandName(event.title)
-                    end
+                    ret[#ret + 1] = M.getCommandName(event.title)
                 end
                 for _, assignment in ipairs(rawData.assignments) do
-                    if not assignment.done then
-                        ret[#ret + 1] = M.getCommandName(assignment.title)
-                    end
+                    ret[#ret + 1] = M.getCommandName(assignment.title)
                 end
                 return ret
-            end,
-            callback = function(args)
-                local name = args[1]
-                M.markDone(M.getEventOrAssignmentFromCommandName(name).title)
+            end),
+            _callback = function(args)
+                local name = args.params[1][1]
+                M.delete(M.getEventOrAssignmentFromCommandName(name).title)
             end
         },
     }
@@ -332,115 +384,130 @@ function M.isUsableCommandTree(v)
     return false
 end
 
-local function filterCompletion(working, items)
-    local newItems = {}
-    for _, item in ipairs(items) do
-        if item:sub(1, #working) == working then
-            table.insert(newItems, item)
-        end
-    end
-    return newItems
-end
 function M.createCalendarCommand()
-    vim.api.nvim_create_user_command("Calendar", function(cmdOpts)
-        -- print(vim.inspect(cmdOpts.fargs))
-        if cmdOpts.fargs == nil or #cmdOpts.fargs == 0 then
-            require('calendar.ui').render()
-            return
-        end
-        local currentCommand = commandTree.Calendar[cmdOpts.fargs[1]]
-        if currentCommand == nil then
-            print("Invalid command " .. cmdOpts.fargs[1])
-            -- require('calendar.ui').render()
-            return
-        end
-        local i = 2
-        while not M.isUsableCommandTree(currentCommand) do
-            if cmdOpts.fargs[i] == nil then
-                print("Invalid command " .. cmdOpts.fargs[i - 1])
-                print(vim.inspect(currentCommand))
-                return
-            end
-            currentCommand = currentCommand[cmdOpts.fargs[i]]
-            if currentCommand == nil then
-                print("Invalid command " .. cmdOpts.fargs[i])
-                return
-            end
-            i = i + 1
-        end
-        if currentCommand.extra ~= nil then
-            local extra = currentCommand.extra()
-            local extraArg = cmdOpts.fargs[i]
-            if extraArg == nil then
-                print("Expected an extra argument after " .. cmdOpts.fargs[i - 1])
-                return
-            end
-            local found = false
-            for _, v in ipairs(extra) do
-                if v == extraArg then
-                    found = true
-                    break
-                end
-            end
-            if not found then
-                print("Invalid extra argument " .. extraArg)
-                return
-            end
-            local args = { extraArg }
-            i = i + 1
-            while i <= #cmdOpts.fargs do
-                args[#args + 1] = cmdOpts.fargs[i]
-                i = i + 1
-            end
-            currentCommand.callback(args)
-        else
-            local args = {}
-            for j = i, #cmdOpts.fargs do
-                args[#args + 1] = cmdOpts.fargs[j]
-            end
-
-            currentCommand.callback(args)
-        end
-    end, {
-        nargs = "*",
-        complete = function(working, current)
-            local currentCommand = commandTree
-            local i = 1
-            local cmdString = ""
-            while i <= #current do
-                local c = current:sub(i, i)
-                if c == " " then
-                    if currentCommand[cmdString] == nil then
-                        return {}
-                    end
-                    currentCommand = currentCommand[cmdString]
-                    if currentCommand.extra ~= nil then
-                        local extra = currentCommand.extra()
-                        for _, v in ipairs(extra) do
-                            currentCommand[v] = {}
-                        end
-                    end
-                    cmdString = ""
-                else
-                    cmdString = cmdString .. c
-                end
-                i = i + 1
-            end
-            if currentCommand == nil then
-                return {}
-            end
-            local cmds = {}
-            for k, _ in pairs(currentCommand) do
-                if k == "extra" or k == "callback" then
-                    goto continue
-                end
-                cmds[#cmds + 1] = k
-                ::continue::
-            end
-            return filterCompletion(working, cmds)
-        end
-
-    })
+    ct.createCmd(commandTree, {})
+    -- vim.api.nvim_create_user_command("Calendar", function(cmdOpts)
+    --     -- print(vim.inspect(cmdOpts.fargs))
+    --     if cmdOpts.fargs == nil or #cmdOpts.fargs == 0 then
+    --         require('calendar.ui').render()
+    --         return
+    --     end
+    --     local currentCommand = commandTree.Calendar[cmdOpts.fargs[1]]
+    --     if currentCommand == nil then
+    --         print("Invalid command " .. cmdOpts.fargs[1])
+    --         -- require('calendar.ui').render()
+    --         return
+    --     end
+    --     local i = 2
+    --     while not M.isUsableCommandTree(currentCommand) do
+    --         if cmdOpts.fargs[i] == nil then
+    --             print("Invalid command " .. cmdOpts.fargs[i - 1])
+    --             print(vim.inspect(currentCommand))
+    --             return
+    --         end
+    --         currentCommand = currentCommand[cmdOpts.fargs[i]]
+    --         if currentCommand == nil then
+    --             print("Invalid command " .. cmdOpts.fargs[i])
+    --             return
+    --         end
+    --         i = i + 1
+    --     end
+    --     if currentCommand.extra ~= nil then
+    --         local extra = currentCommand.extra
+    --         if type(currentCommand.extra) == "function" then
+    --             extra = { extra }
+    --         end
+    --         local extraArgs = {}
+    --         for _, e in ipairs(extra) do
+    --             local expectedExtra = e(extraArgs)
+    --             local extraArg = cmdOpts.fargs[i]
+    --             if extraArg == nil then
+    --                 print("Expected an extra argument after " .. cmdOpts.fargs[i - 1])
+    --                 return
+    --             end
+    --             local found = false
+    --             for _, v in ipairs(expectedExtra) do
+    --                 if v == extraArg then
+    --                     found = true
+    --                     break
+    --                 end
+    --             end
+    --             if not found then
+    --                 print("Invalid extra argument " .. extraArg)
+    --                 return
+    --             end
+    --             extraArgs[#extraArgs + 1] = extraArg
+    --             i = i + 1
+    --         end
+    --         local args = extraArgs
+    --         while i <= #cmdOpts.fargs do
+    --             args[#args + 1] = cmdOpts.fargs[i]
+    --             i = i + 1
+    --         end
+    --         currentCommand.callback(args)
+    --     else
+    --         local args = {}
+    --         for j = i, #cmdOpts.fargs do
+    --             args[#args + 1] = cmdOpts.fargs[j]
+    --         end
+    --
+    --         currentCommand.callback(args)
+    --     end
+    -- end, {
+    --     nargs = "*",
+    --     complete = function(working, current)
+    --         local currentCommand = commandTree
+    --         local i = 1
+    --         local cmdString = ""
+    --         ---@type string[]
+    --         local usedExtras = {}
+    --         ---@type string[]?
+    --         local currentExtra = nil
+    --         while i <= #current do
+    --             local c = current:sub(i, i)
+    --             if c == " " then
+    --                 if currentExtra ~= nil then
+    --                     usedExtras[#usedExtras + 1] = cmdString
+    --                     if currentCommand.extra[#usedExtras + 1] == nil then
+    --                         return {}
+    --                     end
+    --                     currentExtra = currentCommand.extra[#usedExtras + 1](usedExtras)
+    --                 elseif currentCommand[cmdString] == nil then
+    --                     return {}
+    --                 elseif currentCommand[cmdString].extra ~= nil then
+    --                     currentCommand = currentCommand[cmdString]
+    --                     if type(currentCommand.extra) == "function" then
+    --                         currentExtra = currentCommand.extra({})
+    --                     elseif type(currentCommand.extra) == "table" then
+    --                         currentExtra = currentCommand.extra[1]()
+    --                     end
+    --                 else
+    --                     currentCommand = currentCommand[cmdString]
+    --                 end
+    --                 cmdString = ""
+    --             else
+    --                 cmdString = cmdString .. c
+    --             end
+    --             i = i + 1
+    --         end
+    --         if currentCommand == nil then
+    --             return {}
+    --         end
+    --         local cmds = {}
+    --         if currentExtra ~= nil then
+    --             return filterCompletion(working, currentExtra)
+    --         end
+    --         for k, _ in pairs(currentCommand) do
+    --             if k == "extra" or k == "callback" then
+    --                 goto continue
+    --             end
+    --             cmds[#cmds + 1] = k
+    --             ::continue::
+    --         end
+    --         return filterCompletion(working, cmds)
+    --     end
+    --
+    -- })
 end
 
 ---@param o CalendarOptions
@@ -483,6 +550,7 @@ function M.updatePrimary()
     if M.isLowestLock() then
         M.removeCurrentLock()
         M.createLock()
+        require('calendar.ui').refresh()
     end
 end
 
@@ -683,7 +751,7 @@ function M.inputAssignment()
     ---@type string|integer
     local due = vim.fn.input("Due: ")
     if due:sub(1, 1) == '+' then
-        print(due:sub(2))
+        -- print(due:sub(2))
         due = os.time() + utils.relativeTimeToSeconds(due:sub(2))
     end
     local warnTime = vim.fn.input("Warn Time: ")
@@ -850,7 +918,7 @@ end
 
 function M.markDone(name)
     if not isPrimary then
-        print("Not primary")
+        -- print("Not primary")
         M.addRequest({
             type = "markDone",
             name = name
@@ -875,9 +943,62 @@ function M.markDone(name)
     end
 end
 
+---@param delta integer|string
+--Shift all times by delta seconds
+function M.timezoneShift(delta)
+    if not isPrimary then
+        -- print("Not primary")
+        M.addRequest({
+            type = "timezoneShift",
+            data = { delta }
+        })
+        return
+    end
+    delta = utils.relativeTimeToSeconds(delta)
+    for _, event in ipairs(rawData.events) do
+        event.startTime = utils.absoluteTimeToSeconds(event.startTime) + delta
+        event.endTime = utils.absoluteTimeToSeconds(event.endTime) + delta
+    end
+    for _, assignment in ipairs(rawData.assignments) do
+        assignment.due = utils.absoluteTimeToSeconds(assignment.due) + delta
+    end
+    for _, job in ipairs(rawData.jobs) do
+        job.lastRun = job.lastRun + delta
+        job.nextRun = job.nextRun + delta
+    end
+    M.saveData(rawData)
+end
+
+---@param id string
+function M.delete(id)
+    if not isPrimary then
+        M.addRequest({
+            type = "delete",
+            name = id
+        })
+        return
+    end
+    for i, event in ipairs(rawData.events) do
+        if event.title == id then
+            print("Deleting event " .. id)
+            table.remove(rawData.events, i)
+            M.saveData(rawData)
+            return
+        end
+    end
+    for i, assignment in ipairs(rawData.assignments) do
+        if assignment.title == id then
+            print("Deleting assignment " .. id)
+            table.remove(rawData.assignments, i)
+            M.saveData(rawData)
+            return
+        end
+    end
+end
+
 function M.runJob(id, force)
     if not isPrimary then
-        print("Not primary")
+        -- print("Not primary")
         M.addRequest({
             type = "runJob",
             name = id
@@ -1030,7 +1151,11 @@ function M.readData(force)
         return rawData
     end
     file:close()
+    local oldRawData = vim.deepcopy(rawData)
     rawData = vim.tbl_extend("force", M.basicRawData(), data)
+    if vim.inspect(oldRawData) ~= vim.inspect(rawData) then
+        require('calendar.ui').refresh()
+    end
 
 
     return rawData
@@ -1040,6 +1165,11 @@ function M.saveData(data)
     if not isPrimary then
         return
     end
+    if vim.inspect(lastRawData) == vim.inspect(data) then
+        return
+    end
+    lastRawData = vim.deepcopy(data)
+    require('calendar.ui').refresh()
     local file = io.open(opts.dataLocation, "w")
     if file == nil then
         return "Could not open file for writing"

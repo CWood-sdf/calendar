@@ -10,6 +10,11 @@ end
 function M.lengthStrToDelta(str)
     local seconds = 0
     local tempStr = ""
+    local mult = false
+    if str:sub(1, 1) == "-" then
+        mult = true
+        str = str:sub(2)
+    end
     for i = 1, #str do
         local char = str:sub(i, i)
         if char:match("%d") then
@@ -30,6 +35,9 @@ function M.lengthStrToDelta(str)
             tempStr = ""
         end
     end
+    if mult then
+        seconds = seconds * -1
+    end
 
     return seconds
 end
@@ -44,6 +52,10 @@ function M.deltaToLengthStr(d)
         { 60,    "m" },
         { 1,     "s" }
     }
+    if d < 0 then
+        ret = "-"
+        d = d * -1
+    end
     for _, unit in ipairs(units) do
         local unitDelta = math.floor(d / unit[1])
         if unitDelta > 0 then

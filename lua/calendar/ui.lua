@@ -18,15 +18,17 @@ function M.render()
         winnr = vim.api.nvim_open_win(bufnr, true, {
             relative = "editor",
             width = vim.api.nvim_win_get_width(0) - 10,
-            height = vim.api.nvim_win_get_height(0) - 10,
-            row = 5,
+            height = vim.api.nvim_win_get_height(0) - 6,
+            row = 3,
             col = 5,
             style = "minimal"
         })
     end
 
     local data = require('calendar').readData()
+    ---@type CalendarEvent[]
     local events = {}
+    ---@type CalendarAssignment[]
     local assignments = {}
     for _, event in ipairs(data.events) do
         if event.done == true then
@@ -42,12 +44,14 @@ function M.render()
         assignments[#assignments + 1] = assignment
         ::continue::
     end
-    table.sort(events, function(a, b)
-        return utils.absoluteTimeToSeconds(a.startTime) < utils.absoluteTimeToSeconds(b.startTime)
-    end)
-    table.sort(assignments, function(a, b)
-        return utils.absoluteTimeToSeconds(a.due) < utils.absoluteTimeToSeconds(b.due)
-    end)
+    -- table.sort(events, function(a, b)
+    --     return utils.absoluteTimeToSeconds(a.startTime) - utils.relativeTimeToSeconds(a.warnTime) <
+    --         utils.absoluteTimeToSeconds(b.startTime) - utils.relativeTimeToSeconds(b.warnTime)
+    -- end)
+    -- table.sort(assignments, function(a, b)
+    --     return utils.absoluteTimeToSeconds(a.due) - utils.relativeTimeToSeconds(a.warnTime) <
+    --         utils.absoluteTimeToSeconds(b.due) - utils.relativeTimeToSeconds(b.warnTime)
+    -- end)
     local allData = {}
     for _, event in ipairs(events) do
         allData[#allData + 1] = event
@@ -58,17 +62,27 @@ function M.render()
     table.sort(allData, function(a, b)
         local aTime = a.type == "event" and a.startTime or a.due
         local bTime = b.type == "event" and b.startTime or b.due
-        return utils.absoluteTimeToSeconds(aTime) < utils.absoluteTimeToSeconds(bTime)
+        local warnTimeA = a.warnTime
+        local warnTimeB = b.warnTime
+        return utils.absoluteTimeToSeconds(aTime) - utils.relativeTimeToSeconds(warnTimeA) <
+            utils.absoluteTimeToSeconds(bTime) - utils.relativeTimeToSeconds(warnTimeB)
     end)
     vim.api.nvim_buf_set_option(bufnr, "modifiable", true)
     ---@type CalendarWord[][]
     local lines = {}
     table.insert(lines, {
-        { "Calendar" },
+    })
+    table.insert(lines, {
+        { "Calendar", { link = "Title" } },
     })
     if require('calendar').isPrimary() then
         table.insert(lines, {
             { "Primary Instance", { link = "Title" } },
+        })
+    else
+        local countBelow = require('calendar').lockCountBelow() + 1
+        table.insert(lines, {
+            { "Instance " .. countBelow, { link = "Comment" } },
         })
     end
     table.insert(lines, {
@@ -112,7 +126,7 @@ function M.render()
                 { d.title,       { link = "Operator" } },
             })
             table.insert(lines, {
-                { "   Due: " },
+                { "   Due: ",                        { link = "Comment" } },
                 { utils.absoluteTimeToPretty(d.due), { link = "String" } },
             })
             if d.description ~= "" then
@@ -133,22 +147,21 @@ function M.render()
             })
         end
     end
-    table.insert(lines, {
-        { "Jobs" },
-    })
     -- vim.api.nvim_buf_set_lines(bufnr, -1, -1, true, { "" })
     for _, d in ipairs(require('calendar').getRawData().jobs) do
         table.insert(lines, {
             { "Job: " },
-            { d.id },
+            { d.id,   { link = "Operator" } },
         })
         table.insert(lines, {
-            { "   Running: " },
-            { d.running and "Yes" or "No" },
+            { "   Next Run: ",                       { link = "Comment" } },
+            { utils.absoluteTimeToPretty(d.nextRun), { link = "String" } },
         })
         table.insert(lines, {
-            { "   Next Run: " },
-            { utils.absoluteTimeToPretty(d.nextRun) },
+            { "   Running: ",              { link = "Comment" } },
+            { d.running and "Yes" or "No", { link = "Comment" } },
+        })
+        table.insert(lines, {
         })
         -- vim.api.nvim_buf_set_lines(bufnr, -1, -1, true, {
         --     "Job: " .. d.id,
@@ -157,8 +170,10 @@ function M.render()
         -- })
     end
     local linesToSet = {}
+    local indentSize = 2
+    local indent = string.rep(" ", indentSize)
     for _, l in ipairs(lines) do
-        local line = ""
+        local line = indent
         for _, word in ipairs(l) do
             line = line .. word[1]
         end
@@ -176,7 +191,7 @@ function M.render()
 
     local line = 1
     for _, l in ipairs(lines) do
-        local col = 0
+        local col = indentSize
         for _, word in ipairs(l) do
             if word[2] == nil then
                 col = col + #word[1]
@@ -199,6 +214,12 @@ end
 
 function M.isRendering()
     return vim.api.nvim_get_current_buf() == bufnr
+end
+
+function M.refresh()
+    if M.isRendering() then
+        M.render()
+    end
 end
 
 return M
