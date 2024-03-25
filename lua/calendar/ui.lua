@@ -175,6 +175,9 @@ function M.render()
     for _, l in ipairs(lines) do
         local line = indent
         for _, word in ipairs(l) do
+            if word[1] == nil then
+                word[1] = "nil"
+            end
             line = line .. word[1]
         end
         linesToSet[#linesToSet + 1] = line

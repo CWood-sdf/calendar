@@ -51,7 +51,7 @@ local opts = {
 }
 
 ---@class (exact) CalendarRequest
----@field type "runJob"|"markDone"|"addEvent"|"addAssignment"|"timezoneShift"|"delete"
+---@field type "runJob"|"markDone"|"addEvent"|"addAssignment"|"timezoneShift"|"delete"|"resurrect"
 ---@field name string?
 ---@field data table?
 
@@ -174,6 +174,8 @@ function M.handleRequest(r)
         M.delete(r.name)
     elseif r.type == "timezoneShift" then
         M.timezoneShift(r.data[1])
+    elseif r.type == "resurrect" then
+        M.resurrect(r.name)
     else
         print("Invalid request type " .. r.type)
     end
@@ -279,6 +281,26 @@ local commandTree = {
         _callback = function()
             require('calendar.ui').render()
         end,
+        resurrect = {
+            ct.requiredParams(function()
+                local ret = {}
+                for _, event in ipairs(rawData.events) do
+                    if event.done then
+                        ret[#ret + 1] = M.getCommandName(event.title)
+                    end
+                end
+                for _, assignment in ipairs(rawData.assignments) do
+                    if assignment.done then
+                        ret[#ret + 1] = M.getCommandName(assignment.title)
+                    end
+                end
+                return ret
+            end),
+            _callback = function(args)
+                local name = M.getEventOrAssignmentFromCommandName(args.params[1][1]).title
+                M.resurrect(name)
+            end
+        },
         runJob = {
 
             ct.requiredParams(function()
@@ -289,7 +311,8 @@ local commandTree = {
                 return ret
             end),
             _callback = function(args)
-                M.runJob(args[1], args[2] == "true" or args[2] == "1" or args[2] == "force")
+                local secondParam = (args.params[2] or {})[1] or ""
+                M.runJob(args.params[1][1], secondParam ~= "")
             end
         },
         shiftTimezone = {
@@ -323,7 +346,7 @@ local commandTree = {
                     return ret
                 end),
                 _callback = function(args)
-                    local name = args[1]
+                    local name = args.params[1][1]
                     M.modifyAssignment(M.getEventOrAssignmentFromCommandName(name))
                 end
             }
@@ -386,128 +409,6 @@ end
 
 function M.createCalendarCommand()
     ct.createCmd(commandTree, {})
-    -- vim.api.nvim_create_user_command("Calendar", function(cmdOpts)
-    --     -- print(vim.inspect(cmdOpts.fargs))
-    --     if cmdOpts.fargs == nil or #cmdOpts.fargs == 0 then
-    --         require('calendar.ui').render()
-    --         return
-    --     end
-    --     local currentCommand = commandTree.Calendar[cmdOpts.fargs[1]]
-    --     if currentCommand == nil then
-    --         print("Invalid command " .. cmdOpts.fargs[1])
-    --         -- require('calendar.ui').render()
-    --         return
-    --     end
-    --     local i = 2
-    --     while not M.isUsableCommandTree(currentCommand) do
-    --         if cmdOpts.fargs[i] == nil then
-    --             print("Invalid command " .. cmdOpts.fargs[i - 1])
-    --             print(vim.inspect(currentCommand))
-    --             return
-    --         end
-    --         currentCommand = currentCommand[cmdOpts.fargs[i]]
-    --         if currentCommand == nil then
-    --             print("Invalid command " .. cmdOpts.fargs[i])
-    --             return
-    --         end
-    --         i = i + 1
-    --     end
-    --     if currentCommand.extra ~= nil then
-    --         local extra = currentCommand.extra
-    --         if type(currentCommand.extra) == "function" then
-    --             extra = { extra }
-    --         end
-    --         local extraArgs = {}
-    --         for _, e in ipairs(extra) do
-    --             local expectedExtra = e(extraArgs)
-    --             local extraArg = cmdOpts.fargs[i]
-    --             if extraArg == nil then
-    --                 print("Expected an extra argument after " .. cmdOpts.fargs[i - 1])
-    --                 return
-    --             end
-    --             local found = false
-    --             for _, v in ipairs(expectedExtra) do
-    --                 if v == extraArg then
-    --                     found = true
-    --                     break
-    --                 end
-    --             end
-    --             if not found then
-    --                 print("Invalid extra argument " .. extraArg)
-    --                 return
-    --             end
-    --             extraArgs[#extraArgs + 1] = extraArg
-    --             i = i + 1
-    --         end
-    --         local args = extraArgs
-    --         while i <= #cmdOpts.fargs do
-    --             args[#args + 1] = cmdOpts.fargs[i]
-    --             i = i + 1
-    --         end
-    --         currentCommand.callback(args)
-    --     else
-    --         local args = {}
-    --         for j = i, #cmdOpts.fargs do
-    --             args[#args + 1] = cmdOpts.fargs[j]
-    --         end
-    --
-    --         currentCommand.callback(args)
-    --     end
-    -- end, {
-    --     nargs = "*",
-    --     complete = function(working, current)
-    --         local currentCommand = commandTree
-    --         local i = 1
-    --         local cmdString = ""
-    --         ---@type string[]
-    --         local usedExtras = {}
-    --         ---@type string[]?
-    --         local currentExtra = nil
-    --         while i <= #current do
-    --             local c = current:sub(i, i)
-    --             if c == " " then
-    --                 if currentExtra ~= nil then
-    --                     usedExtras[#usedExtras + 1] = cmdString
-    --                     if currentCommand.extra[#usedExtras + 1] == nil then
-    --                         return {}
-    --                     end
-    --                     currentExtra = currentCommand.extra[#usedExtras + 1](usedExtras)
-    --                 elseif currentCommand[cmdString] == nil then
-    --                     return {}
-    --                 elseif currentCommand[cmdString].extra ~= nil then
-    --                     currentCommand = currentCommand[cmdString]
-    --                     if type(currentCommand.extra) == "function" then
-    --                         currentExtra = currentCommand.extra({})
-    --                     elseif type(currentCommand.extra) == "table" then
-    --                         currentExtra = currentCommand.extra[1]()
-    --                     end
-    --                 else
-    --                     currentCommand = currentCommand[cmdString]
-    --                 end
-    --                 cmdString = ""
-    --             else
-    --                 cmdString = cmdString .. c
-    --             end
-    --             i = i + 1
-    --         end
-    --         if currentCommand == nil then
-    --             return {}
-    --         end
-    --         local cmds = {}
-    --         if currentExtra ~= nil then
-    --             return filterCompletion(working, currentExtra)
-    --         end
-    --         for k, _ in pairs(currentCommand) do
-    --             if k == "extra" or k == "callback" then
-    --                 goto continue
-    --             end
-    --             cmds[#cmds + 1] = k
-    --             ::continue::
-    --         end
-    --         return filterCompletion(working, cmds)
-    --     end
-    --
-    -- })
 end
 
 ---@param o CalendarOptions
@@ -603,6 +504,10 @@ function M.validateEvent(e)
         return "Warn " .. validateWarn
     end
 
+    if type(e.location) ~= "string" then
+        return "Location must be a string"
+    end
+
     if type(e.type) ~= "string" then
         return "Type must be a string"
     end
@@ -690,10 +595,12 @@ function M.modifyEvent(e)
     M.addEvent(newEvent)
 end
 
+---@param event CalendarEvent
 function M.addEvent(event)
     event.type = "event"
     local validate = M.validateEvent(event)
     if validate ~= '' then
+        print(validate)
         return validate
     end
     if not isPrimary then
@@ -706,6 +613,7 @@ function M.addEvent(event)
     for i, e in ipairs(rawData.events) do
         if e.title == event.title then
             rawData.events[i] = event
+            -- rawData.events[i].done = false
             return M.saveData(rawData)
         end
     end
@@ -773,6 +681,7 @@ end
 
 function M.modifyAssignment(a)
     if a == nil then
+        print("Assignment not found")
         return
     end
     local assignment = nil
@@ -823,6 +732,7 @@ function M.addAssignment(assignment)
     for i, a in ipairs(rawData.assignments) do
         if a.title == assignment.title then
             rawData.assignments[i] = vim.tbl_extend("force", rawData.assignments[i], assignment)
+            -- rawData.assignments[i].done = false
             return M.saveData(rawData)
         end
     end
@@ -943,6 +853,33 @@ function M.markDone(name)
     end
 end
 
+function M.resurrect(name)
+    if not isPrimary then
+        -- print("Not primary")
+        M.addRequest({
+            type = "resurrect",
+            name = name
+        })
+        return
+    end
+    for i, event in ipairs(rawData.events) do
+        if event.title == name then
+            rawData.events[i].done = false
+            print("Event " .. name .. " marked as not done")
+            M.saveData(rawData)
+            return
+        end
+    end
+    for i, assignment in ipairs(rawData.assignments) do
+        if assignment.title == name then
+            rawData.assignments[i].done = false
+            print("Assignment " .. name .. " marked as not done")
+            M.saveData(rawData)
+            return
+        end
+    end
+end
+
 ---@param delta integer|string
 --Shift all times by delta seconds
 function M.timezoneShift(delta)
@@ -1005,6 +942,7 @@ function M.runJob(id, force)
         })
         return
     end
+    -- print("attempting to run job " .u id)
     for _, job in ipairs(opts.import) do
         if job.id == id then
             for i, trackedJob in ipairs(rawData.jobs) do
@@ -1016,7 +954,19 @@ function M.runJob(id, force)
                     print("Running job " .. id)
                     rawData.jobs[i].running = true
                     rawData.jobs[i].lastRun = os.time()
-                    rawData.jobs[i].nextRun = os.time() + utils.relativeTimeToSeconds(job.runFrequency)
+                    if job.runFrequency:sub(1, 1) == 'c' then
+                        local cron = require('calendar.cron')
+                        local str = job.runFrequency:sub(2)
+                        local parsed = cron.parse(str)
+                        if parsed == nil then
+                            print("Invalid cron string " .. str)
+                            return
+                        end
+                        local nextRun = cron.nextOccurence(parsed)
+                        rawData.jobs[i].nextRun = nextRun
+                    else
+                        rawData.jobs[i].nextRun = os.time() + utils.relativeTimeToSeconds(job.runFrequency)
+                    end
                     M.saveData(rawData)
                     break
                 end
@@ -1046,7 +996,19 @@ function M.runJob(id, force)
                         print("Job " .. id .. " succeeded")
                         rawData.jobs[i].running = false
                         rawData.jobs[i].lastRun = os.time()
-                        rawData.jobs[i].nextRun = os.time() + utils.relativeTimeToSeconds(job.runFrequency)
+                        if job.runFrequency:sub(1, 1) == 'c' then
+                            local cron = require('calendar.cron')
+                            local str = job.runFrequency:sub(2)
+                            local parsed = cron.parse(str)
+                            if parsed == nil then
+                                print("Invalid cron string " .. str)
+                                return
+                            end
+                            local nextRun = cron.nextOccurence(parsed)
+                            rawData.jobs[i].nextRun = nextRun
+                        else
+                            rawData.jobs[i].nextRun = os.time() + utils.relativeTimeToSeconds(job.runFrequency)
+                        end
                         for j, ownedJob in ipairs(ownedJobs) do
                             if ownedJob == id then
                                 table.remove(ownedJobs, j)
