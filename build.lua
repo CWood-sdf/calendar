@@ -1,8 +1,12 @@
-vim.schedule(function()
-    vim.fn.jobstart("cd lua/ccronexpr && gcc ccronexpr.c -I. -Wall -Wextra -std=c89 -o libccronexpr.so -fPIC -shared", {
-        on_exit = function(code)
-            print(code)
-        end,
-    })
-end)
+vim.fn.jobstart("bash ./build.sh", {
+    on_exit = function(code)
+        vim.notify(code)
+    end,
+    on_stdout = function(data)
+        vim.notify(vim.inspect(data))
+    end,
+    on_stderr = function(data)
+        vim.notify(vim.inspect(data))
+    end
+})
 
