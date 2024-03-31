@@ -75,12 +75,12 @@ function M.render()
     table.insert(lines, {
         { "Calendar", { link = "Title" } },
     })
-    if require('calendar').isPrimary() then
+    if require('calendar.lock').isPrimary() then
         table.insert(lines, {
             { "Primary Instance", { link = "Title" } },
         })
     else
-        local countBelow = require('calendar').lockCountBelow() + 1
+        local countBelow = require('calendar.lock').lockCountBelow() + 1
         table.insert(lines, {
             { "Instance " .. countBelow, { link = "Comment" } },
         })
