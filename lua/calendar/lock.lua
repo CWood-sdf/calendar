@@ -3,6 +3,7 @@ local lockDir = ""
 local isPrimary = false
 local lockIndex = 0
 local dataPath = vim.fn.stdpath("data")
+local timeFmt = "%Y %b %d %X"
 if type(dataPath) == "table" then
     lockDir = dataPath[1]
 else
@@ -24,7 +25,14 @@ function M.setup(options)
     end
 end
 
+---@param index number?
+---@return string
 function M.getLockFileName(index)
+    index = index or lockIndex
+    if index == 0 then
+        print("No index found")
+        return ""
+    end
     return opts.lockDir .. "/calendar_" .. index .. ".lock"
 end
 
@@ -34,7 +42,7 @@ function M.checkPrimaryLockExists()
         return false
     end
     file:close()
-    return true
+    return not M.isStale(1)
 end
 
 function M.lockCountBelow()
@@ -55,19 +63,42 @@ function M.removeCurrentLock()
     os.remove(fileName)
 end
 
+function M.updateLock()
+    if lockIndex == 0 then
+        print("lock does not exist")
+        return
+    end
+    local fname = M.getLockFileName()
+    local file = io.open(fname, "w")
+    if file == nil then
+        error("could not open lock file")
+    end
+    file:write(vim.fn.strftime(timeFmt))
+    file:close()
+end
+
 function M.createLock()
     local index = 1
     while M.lockFileExists(index) do
         index = index + 1
     end
-    local file = io.open(M.getLockFileName(index), "w")
-    if file == nil then
-        error("Could not open lock file for writing")
-    end
-    file:write(tostring(index))
-    file:close()
     lockIndex = index
     isPrimary = index == 1
+    M.updateLock()
+end
+
+function M.isStale(index)
+    local file = io.open(M.getLockFileName(index), "r")
+    if file == nil then
+        return false
+    end
+    local contents = file:read("*a")
+    if vim.fn.strptime(timeFmt, vim.fn.strftime(timeFmt)) - vim.fn.strptime(timeFmt, contents) > 5 * 60 then
+        file:close()
+        return true
+    end
+    file:close()
+    return false
 end
 
 function M.lockFileExists(index)
@@ -76,7 +107,7 @@ function M.lockFileExists(index)
         return false
     end
     file:close()
-    return true
+    return not M.isStale(index)
 end
 
 function M.isLowestLock()

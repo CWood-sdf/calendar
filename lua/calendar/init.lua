@@ -364,6 +364,7 @@ function M.setup(o)
 end
 
 function M.updatePrimary()
+    lock.updateLock()
     if lock.isPrimary() then
         return
     end
