@@ -23,6 +23,7 @@ function M.setup(options)
             opts[key] = options[key]
         end
     end
+    M.createLock()
 end
 
 ---@param index number?
@@ -89,11 +90,26 @@ end
 
 function M.isStale(index)
     local file = io.open(M.getLockFileName(index), "r")
+    -- if index ~= 1 then return false end
     if file == nil then
         return false
     end
     local contents = file:read("*a")
-    if vim.fn.strptime(timeFmt, vim.fn.strftime(timeFmt)) - vim.fn.strptime(timeFmt, contents) > 5 * 60 then
+    if vim.fn.strptime(timeFmt, vim.fn.strftime(timeFmt)) - vim.fn.strptime(timeFmt, contents) > 10 * 60 then
+        file:close()
+        return true
+    end
+    file:close()
+    return false
+end
+
+function M.isntReporting(index)
+    local file = io.open(M.getLockFileName(index), "r")
+    if file == nil then
+        return false
+    end
+    local contents = file:read("*a")
+    if vim.fn.strptime(timeFmt, vim.fn.strftime(timeFmt)) - vim.fn.strptime(timeFmt, contents) > 10 then
         file:close()
         return true
     end
@@ -127,7 +143,17 @@ function M.forceClearLocks()
     end
 end
 
+function M.clearStaleLower()
+    for i = 1, lockIndex do
+        if M.lockFileExists(i) and M.isStale(i) then
+            os.remove(M.getLockFileName(i))
+        end
+    end
+end
+
 function M.isPrimary()
+    M.clearStaleLower()
+    M.updateLock()
     return isPrimary
 end
 

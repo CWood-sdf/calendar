@@ -17,8 +17,8 @@ function M.render()
     if winnr == nil or not vim.api.nvim_win_is_valid(winnr) then
         winnr = vim.api.nvim_open_win(bufnr, true, {
             relative = "editor",
-            width = vim.api.nvim_win_get_width(0) - 10,
-            height = vim.api.nvim_win_get_height(0) - 6,
+            width = vim.o.columns - 10,
+            height = vim.o.lines - 6,
             row = 3,
             col = 5,
             style = "minimal"
@@ -84,6 +84,15 @@ function M.render()
         table.insert(lines, {
             { "Instance " .. countBelow, { link = "Comment" } },
         })
+        if require('calendar.lock').isntReporting(1) then
+            table.insert(lines, {
+                { "Primary isnt reporting", { fg = "#a57300" } },
+            })
+        else
+            table.insert(lines, {
+                { "Primary instance is active", { fg = "#00a528" } },
+            })
+        end
     end
     table.insert(lines, {
     })
