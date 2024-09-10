@@ -10,8 +10,7 @@ else
     lockDir = dataPath
 end
 
----@class  CalendarLockOptions
----@field lockDir string
+---@type CalendarLockOptions
 local opts = {
     lockDir = lockDir,
 }
@@ -85,12 +84,11 @@ function M.createLock()
     end
     lockIndex = index
     isPrimary = index == 1
-    M.updateLock()
 end
 
 function M.isStale(index)
     local file = io.open(M.getLockFileName(index), "r")
-    -- if index ~= 1 then return false end
+    if index ~= 1 then return false end
     if file == nil then
         return false
     end

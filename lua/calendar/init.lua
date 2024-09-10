@@ -1,6 +1,6 @@
 local M = {}
 
-local lock = require("calendar.lock")
+local lock = require("calendar.lock2")
 local mods = {
     validate = require("calendar.validate"),
 }
@@ -355,27 +355,15 @@ function M.setup(o)
                 end
             end
             M.saveData(rawData)
-            lock.removeCurrentLock()
+            lock.killThisLock()
         end,
     })
 
-    lock.createLock()
     M.syncJobsTracked()
 end
 
 function M.updatePrimary()
     lock.updateLock()
-    if lock.isPrimary() then
-        return
-    end
-    if lock.checkPrimaryLockExists() then
-        return
-    end
-    if lock.isLowestLock() then
-        lock.removeCurrentLock()
-        lock.createLock()
-        require("calendar.ui").refresh()
-    end
 end
 
 function M.getOpts()

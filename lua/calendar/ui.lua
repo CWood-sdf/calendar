@@ -75,18 +75,23 @@ function M.render()
     table.insert(lines, {
         { "Calendar", { link = "Title" } },
     })
-    if require('calendar.lock').isPrimary() then
+    if require('calendar.lock2').isPrimary() then
         table.insert(lines, {
             { "Primary Instance", { link = "Title" } },
         })
     else
-        local countBelow = require('calendar.lock').lockCountBelow() + 1
+        local countBelow = require('calendar.lock2').getThisLockId()
         table.insert(lines, {
             { "Instance " .. countBelow, { link = "Comment" } },
         })
-        if require('calendar.lock').isntReporting(1) then
+        if require('calendar.lock2').maybeDead(1) then
+            local str = "Primary isnt reporting"
+            if require('calendar.lock2').isMaybeActingPrimary() then
+                str = str .. ', taking over in ' .. require('calendar.lock2').getTakeOver() .. 's'
+                vim.defer_fn(M.refresh, 1000)
+            end
             table.insert(lines, {
-                { "Primary isnt reporting", { fg = "#a57300" } },
+                { str, { fg = "#a57300" } },
             })
         else
             table.insert(lines, {
