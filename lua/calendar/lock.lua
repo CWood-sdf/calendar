@@ -6,6 +6,7 @@ local M = {}
 ---@field isThis boolean
 
 local timeFmt = "%Y %b %d %X"
+local promoteScheduled = false
 
 ---@type Calendar.Lock
 local currentLock = {
@@ -66,8 +67,14 @@ function M.killLock(index)
 end
 
 local function lockTryPromote()
-    if M.isActingPrimary() then
-        M.forceClearLocks()
+    if M.isActingPrimary() and not promoteScheduled then
+        promoteScheduled = true
+        vim.defer_fn(function()
+            promoteScheduled = false
+            if M.isActingPrimary() then
+                M.forceClearLocks()
+            end
+        end, currentLock.id * 10)
     end
 end
 function M.updateLock()
@@ -95,10 +102,15 @@ end
 function M.getReportTime(index)
     local file = io.open(M.getLockFileName(index), "r")
     if file == nil then
-        return 0
+        return 100000
     end
     local contents = file:read("*a")
-    local deadTime = vim.fn.strptime(timeFmt, vim.fn.strftime(timeFmt)) - vim.fn.strptime(timeFmt, contents)
+    local time = vim.fn.strptime(timeFmt, contents)
+    if time == 0 then
+        file:close()
+        return 0
+    end
+    local deadTime = vim.fn.strptime(timeFmt, vim.fn.strftime(timeFmt)) - time
     file:close()
     return deadTime
 end
