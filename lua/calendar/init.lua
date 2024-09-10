@@ -1,6 +1,6 @@
 local M = {}
 
-local lock = require("calendar.lock2")
+local lock = require("calendar.lock")
 local mods = {
     validate = require("calendar.validate"),
 }

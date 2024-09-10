@@ -1,19 +1,49 @@
 local M = {}
-local lockDir = ""
-local isPrimary = false
-local lockIndex = 0
-local dataPath = vim.fn.stdpath("data")
+
+---@class (exact) Calendar.Lock
+---@field id number
+---@field reportTime string
+---@field isThis boolean
+
 local timeFmt = "%Y %b %d %X"
+
+---@type Calendar.Lock
+local currentLock = {
+    id = 0,
+    reportTime = "",
+    isThis = true,
+
+}
+local lockDir = ""
+local dataPath = vim.fn.stdpath("data")
+
 if type(dataPath) == "table" then
     lockDir = dataPath[1]
 else
     lockDir = dataPath
 end
 
----@type CalendarLockOptions
+---@class CalendarLockOptions
+---@field lockDir string
 local opts = {
     lockDir = lockDir,
 }
+
+function M.acquireLock()
+    local i = 1
+    while currentLock.id == 0 do
+        if not M.lockExists(i) then
+            currentLock.id = i
+            break
+        end
+        i = i + 1
+    end
+    require("calendar.ui").refresh()
+end
+
+function M.getThisLockId()
+    return currentLock.id
+end
 
 ---@param options CalendarLockOptions
 function M.setup(options)
@@ -22,13 +52,39 @@ function M.setup(options)
             opts[key] = options[key]
         end
     end
-    M.createLock()
+    M.acquireLock()
+end
+
+function M.killThisLock()
+    M.killLock(currentLock.id)
+end
+
+function M.killLock(index)
+    local name = M.getLockFileName(index)
+
+    os.remove(name)
+end
+
+local function lockTryPromote()
+    if M.isActingPrimary() then
+        M.forceClearLocks()
+    end
+end
+function M.updateLock()
+    lockTryPromote()
+    local str = vim.fn.strftime(timeFmt)
+    local file = io.open(M.getLockFileName(currentLock.id), 'w')
+    if file == nil then
+        print("cant write to lock file??")
+        return
+    end
+    file:write(str)
+    file:close()
 end
 
 ---@param index number?
 ---@return string
 function M.getLockFileName(index)
-    index = index or lockIndex
     if index == 0 then
         print("No index found")
         return ""
@@ -36,123 +92,73 @@ function M.getLockFileName(index)
     return opts.lockDir .. "/calendar_" .. index .. ".lock"
 end
 
-function M.checkPrimaryLockExists()
-    local file = io.open(M.getLockFileName(1), "r")
-    if file == nil then
-        return false
-    end
-    file:close()
-    return not M.isStale(1)
-end
-
-function M.lockCountBelow()
-    local count = 0
-    for i = 1, lockIndex do
-        if i == lockIndex then
-            break
-        end
-        if M.lockFileExists(i) then
-            count = count + 1
-        end
-    end
-    return count
-end
-
-function M.removeCurrentLock()
-    local fileName = M.getLockFileName(lockIndex)
-    os.remove(fileName)
-end
-
-function M.updateLock()
-    if lockIndex == 0 then
-        print("lock does not exist")
-        return
-    end
-    local fname = M.getLockFileName()
-    local file = io.open(fname, "w")
-    if file == nil then
-        error("could not open lock file")
-    end
-    file:write(vim.fn.strftime(timeFmt))
-    file:close()
-end
-
-function M.createLock()
-    local index = 1
-    while M.lockFileExists(index) do
-        index = index + 1
-    end
-    lockIndex = index
-    isPrimary = index == 1
-end
-
-function M.isStale(index)
+function M.getReportTime(index)
     local file = io.open(M.getLockFileName(index), "r")
-    if index ~= 1 then return false end
     if file == nil then
-        return false
+        return 0
     end
     local contents = file:read("*a")
-    if vim.fn.strptime(timeFmt, vim.fn.strftime(timeFmt)) - vim.fn.strptime(timeFmt, contents) > 10 * 60 then
-        file:close()
-        return true
-    end
+    local deadTime = vim.fn.strptime(timeFmt, vim.fn.strftime(timeFmt)) - vim.fn.strptime(timeFmt, contents)
     file:close()
-    return false
+    return deadTime
 end
 
-function M.isntReporting(index)
-    local file = io.open(M.getLockFileName(index), "r")
-    if file == nil then
-        return false
-    end
-    local contents = file:read("*a")
-    if vim.fn.strptime(timeFmt, vim.fn.strftime(timeFmt)) - vim.fn.strptime(timeFmt, contents) > 10 then
-        file:close()
-        return true
-    end
-    file:close()
-    return false
+function M.maybeDead(index)
+    return M.getReportTime(index) > 10
 end
 
-function M.lockFileExists(index)
-    local file = io.open(M.getLockFileName(index), "r")
-    if file == nil then
-        return false
-    end
-    file:close()
-    return not M.isStale(index)
+function M.killable(index)
+    return M.getReportTime(index) > 3 * 60
 end
 
-function M.isLowestLock()
-    for i = 1, lockIndex - 1 do
-        if M.lockFileExists(i) then
+function M.getTakeOver()
+    local takeOver = 0
+    for i = 1, currentLock.id - 1 do
+        local nextTime = 3 * 60 - M.getReportTime(i)
+        takeOver = math.max(takeOver, nextTime)
+    end
+    return takeOver
+end
+
+function M.isMaybeActingPrimary()
+    if M.isPrimary() then return false end
+    for i = 1, currentLock.id - 1 do
+        if M.lockExists(i) and not M.maybeDead(i) then
             return false
         end
     end
     return true
 end
 
-function M.forceClearLocks()
-    for i = 1, lockIndex do
-        if M.lockFileExists(i) then
-            os.remove(M.getLockFileName(i))
-        end
+function M.lockExists(index)
+    local file = io.open(M.getLockFileName(index), "r")
+    if file == nil then
+        return false
     end
+    file:close()
+    return true
 end
 
-function M.clearStaleLower()
-    for i = 1, lockIndex do
-        if M.lockFileExists(i) and M.isStale(i) then
-            os.remove(M.getLockFileName(i))
+function M.isActingPrimary()
+    if M.isPrimary() then return false end
+    for i = 1, currentLock.id - 1 do
+        if M.lockExists(i) and not M.killable(i) then
+            return false
         end
     end
+    return true
 end
 
 function M.isPrimary()
-    M.clearStaleLower()
-    M.updateLock()
-    return isPrimary
+    return currentLock.id == 1
+end
+
+function M.forceClearLocks()
+    for i = 1, currentLock.id do
+        M.killLock(i)
+    end
+    currentLock.id = 0
+    M.acquireLock()
 end
 
 return M
