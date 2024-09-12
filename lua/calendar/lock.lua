@@ -72,9 +72,9 @@ local function lockTryPromote()
         vim.defer_fn(function()
             promoteScheduled = false
             if M.isActingPrimary() then
-                M.forceClearLocks()
+                M.tryClearLocks()
             end
-        end, currentLock.id * 10)
+        end, currentLock.id * 1000)
     end
 end
 function M.updateLock()
@@ -165,12 +165,29 @@ function M.isPrimary()
     return currentLock.id == 1
 end
 
-function M.forceClearLocks()
-    for i = 1, currentLock.id do
+---@return boolean
+function M.tryClearLocks()
+    for i = 1, currentLock.id - 1 do
+        if M.lockExists(i) and not M.killable(i) then
+            return false
+        end
         M.killLock(i)
     end
+    local id = currentLock.id
     currentLock.id = 0
     M.acquireLock()
+    M.killLock(id)
+    return true
+end
+
+function M.forceClearLocks()
+    for i = 1, currentLock.id - 1 do
+        M.killLock(i)
+    end
+    local id = currentLock.id
+    currentLock.id = 0
+    M.acquireLock()
+    M.killLock(id)
 end
 
 return M

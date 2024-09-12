@@ -342,7 +342,7 @@ function M.setup(o)
     lock.setup(opts)
     M.readData(true)
     M.createCalendarCommand()
-    vim.api.nvim_create_autocmd({ "VimLeave" }, {
+    vim.api.nvim_create_autocmd({ "VimLeavePre" }, {
         callback = function()
             for _, job in ipairs(ownedJobs) do
                 for i, trackedJob in ipairs(rawData.jobs) do
