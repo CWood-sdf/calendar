@@ -209,6 +209,12 @@ local commandTree = {
         _callback = function()
             require("calendar.ui").render()
         end,
+        parseThisBuf = {
+            _callback = function()
+                local buf = vim.api.nvim_get_current_buf()
+                require('calendar.bufferreader').parseBuf(buf)
+            end,
+        },
         resurrect = {
             ct.requiredParams(function()
                 local ret = {}

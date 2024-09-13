@@ -82,4 +82,5 @@ function validate.assignment(a)
 	end
 	return ""
 end
+
 return validate
