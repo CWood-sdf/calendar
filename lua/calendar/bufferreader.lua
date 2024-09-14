@@ -37,6 +37,7 @@ function M.parseBuf(buf)
             spl = vim.split(vim.api.nvim_buf_get_lines(buf, line, line + 1, false)[1], ":")
             line = line + 1
             if #spl < 2 then
+                line = line - 1
                 break
             end
             local right = spl[2]
