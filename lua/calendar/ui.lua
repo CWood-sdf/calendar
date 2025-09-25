@@ -13,6 +13,16 @@ local M = {}
 function M.render()
     if bufnr == nil or not vim.api.nvim_buf_is_valid(bufnr) then
         bufnr = vim.api.nvim_create_buf(false, true)
+        vim.keymap.set("n", "q", function()
+            if winnr ~= nil and vim.api.nvim_win_is_valid(winnr) then
+                vim.api.nvim_win_hide(winnr)
+            end
+        end, {
+            buffer = bufnr
+        })
+        vim.api.nvim_set_option_value("filetype", "calendar", {
+            buf = bufnr
+        })
     end
     if winnr == nil or not vim.api.nvim_win_is_valid(winnr) then
         winnr = vim.api.nvim_open_win(bufnr, true, {

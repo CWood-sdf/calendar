@@ -209,6 +209,34 @@ local commandTree = {
         _callback = function()
             require("calendar.ui").render()
         end,
+        templateThisBuf = {
+            _callback = function()
+                local buf = vim.api.nvim_get_current_buf()
+                local str = [[
+---@class (exact) CalendarEvent
+---@field title string
+---@field description string
+---@field location string?
+---@field startTime CalendarAbsoluteTime
+---@field endTime CalendarAbsoluteTime
+---@field warnTime CalendarRelativeTime
+---@field type "event"
+---@field done boolean?
+---@field source string?
+
+---@class (exact) CalendarAssignment
+---@field title string
+---@field description string
+---@field due CalendarAbsoluteTime
+---@field warnTime CalendarRelativeTime
+---@field type "assignment"
+---@field source string?
+---@field done boolean?
+]]
+                local lines = vim.split(str, "\n")
+                vim.api.nvim_buf_set_lines(buf, 0, -1, true, lines)
+            end,
+        },
         parseThisBuf = {
             _callback = function()
                 local buf = vim.api.nvim_get_current_buf()
